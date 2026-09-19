@@ -1,178 +1,118 @@
-# Two-stage defect triage with few-shot type classification
+# Defect triage for factory parts: find it, then name it
 
-**The problem.** On a production line, a one-class anomaly detector can flag a bad part using only images of good parts. It cannot tell you *what kind* of defect it found, and root-cause analysis needs the type: a scratch on the head points at one station, a thread defect at another. Real examples of each defect type are rare by design (a well-run line produces few defects), so a type classifier has to learn from a handful of images.
-
-**The question this project answers.** With `k` real images per defect type (default 5), does adding synthetic defects help the type classifier, and does refining those synthetics with Stable Diffusion help further?
-
-**The system.**
-
-```
-image ──► Stage 1: is it defective?          ──► Stage 2: what kind of defect?
-          PatchCore-style kNN on ResNet           frozen ResNet50 features +
-          patch features, trained on               logistic regression,
-          GOOD images only                         k real images per class
-                                                   (+ synthetic, under test)
-```
-
-Stage 2 is trained three ways on the *same* `k` real images and the *same* flip/rotate augmentation. The regimes differ only in what is added:
-
-| regime | added data |
-|---|---|
-| `real_only` | nothing |
-| `real_plus_synthetic` | cut-paste synthetics: the real defect (from MVTec's ground-truth mask) pasted onto clean parts with jitter |
-| `real_plus_refined` | the same synthetics passed through Stable Diffusion img2img at low strength, which keeps the defect in place and harmonises the paste boundary |
-
-Everything is evaluated on real held-out defect images that no stage ever saw.
+**In one sentence:** a system that looks at a photo of a screw, decides whether it's defective, and if so, says *what kind* of defect it is, using only a handful of example photos per defect type.
 
 ---
 
-## Setup
+## Why this is a real problem
 
-Python 3.10+. Tested layout: run every command from the project root.
+On a production line, cameras photograph every part. You want two answers for each photo:
+
+1. **Is this part bad?**
+2. **If yes, what's wrong with it?** A scratch on the head and a damaged thread come from different machines, so knowing the type tells you where to look for the cause.
+
+Question 1 is easy to get data for: a good factory produces thousands of good parts, so you have plenty of photos of "normal." Question 2 is hard: defects are rare, so you might have five photos of each defect type. Five is not enough to train a normal image classifier.
+
+This project shows how to answer both questions anyway.
+
+---
+
+## How it works
+
+Two stages, one after the other.
+
+**Stage 1: "Is it bad?"** Trained only on photos of good screws. It learns what normal looks like, patch by patch, and flags anything that doesn't match. It never sees a defect during training. As a bonus, because it checks each small patch of the image, it also knows *where* the odd part is.
+
+**Stage 2: "What's wrong?"** A classifier that names the defect type (five types for screws). It is trained on just 5 real photos per type. To make those 5 go further, we tested adding artificial examples:
+
+- **Cut-paste:** take the real defect out of one of the 5 photos (using its outline) and paste it onto a photo of a good screw, in the matching spot. Now you have 40 fake-but-realistic examples per type instead of 5.
+- **Cut-paste + diffusion touch-up:** same, but run Stable Diffusion over the pasted edge so it blends in. We wanted to know if this helps.
+
+And one more trick that turned out to matter most: instead of showing stage 2 the whole screw, **show it only the small area stage 1 flagged**. Small defects are a few pixels on a big photo; zooming in on them helps a lot.
 
 ```
-defect-triage/
-├── config.yaml
-├── requirements.txt
-├── README.md
-└── scripts/
-    ├── common.py                        shared helpers (do not run)
-    ├── 1_setup_mvtec.py
-    ├── 2_make_splits_and_synthetic.py
-    ├── 3_refine_with_diffusion.py
-    ├── 4_anomaly_stage.py
-    ├── 5_train_classifier.py
-    ├── 6_evaluate.py
-    └── 7_export_onnx.py
-run_seed.ps1                         one extra seed, end to end
+photo ──► Stage 1: bad or good?  ──► if bad: where? ──► crop there ──► Stage 2: which defect type?
+          (trained on good only)      (free from stage 1)             (5 real examples + synthetics)
 ```
+
+---
+
+## What we found
+
+Tested on the MVTec AD "screw" dataset, three runs with different random choices of the 5 training photos.
+
+**Stage 1 works well.** It ranks defective vs good screws correctly 97.5% of the time (AUROC 0.975). Set to catch 97% of defects, it wrongly flags 12% of good parts. It puts the true defect inside its "look here" crop 85% of the time.
+
+**Stage 2, accuracy at naming the defect type (5 types, so guessing = 20%):**
+
+| what the classifier sees | 5 real photos only | + cut-paste synthetics | + synthetics with diffusion touch-up |
+|---|---:|---:|---:|
+| the whole screw | 47% | 57% | 60% |
+| **the area stage 1 flagged** | **77%** | **81%** | 79% |
+| the exact defect area (cheating, for reference) | 84% | 89% | 87% |
+
+Four things this table says:
+
+1. **Zooming in on the area stage 1 flagged is the biggest win: +29 points**, from 47% to 77%, with no extra data. Small defects were simply too small to see in the full picture.
+2. **Cut-paste synthetics help every time.** In all three runs, both with and without zoom, adding them improved accuracy (by 2 to 16 points depending on the setup). The gains land on the two hardest defect types.
+3. **The diffusion touch-up didn't help.** Sometimes +2, sometimes −1, never outside the noise. We report this as a null result rather than hide it. The reason is fairly clear: the touch-up only smooths the edge of the paste and leaves the defect itself untouched, and once you zoom in, the edge barely matters.
+4. **The next bottleneck is stage 1's aim, not more data.** When the crop is placed perfectly (the "cheating" row), accuracy rises another 7–8 points, and the hardest type (thread_side) doubles. Improving where stage 1 points is the obvious follow-up.
+
+Per defect type, with zoom and cut-paste synthetics: three of the five types are at 97–100%. The two thread types are at 41% and 61%; those are the smallest defects and the ones stage 1 most often mislocates.
+
+Figures and the full auto-generated reports are in [`figures/`](figures/).
+
+---
+
+## Running it yourself
+
+You need Python 3.10+, a GPU (Intel Arc, NVIDIA, or CPU-only if patient), and the MVTec AD dataset (free, needs registration: https://www.mvtec.com/company/research/datasets/mvtec-ad).
 
 ```powershell
 python -m venv venv
 venv\Scripts\activate
-python -m pip install --upgrade pip
+pip install torch torchvision --index-url https://download.pytorch.org/whl/xpu   # Intel Arc
+# NVIDIA: --index-url https://download.pytorch.org/whl/cu124     CPU only: no --index-url
+pip install -r requirements.txt
 ```
 
-**Install PyTorch for your hardware first.**
+Put `mvtec_ad.tar.xz` in `data/mvtec_ad/`, then run the scripts in order from the project root:
 
-| hardware | command |
-|---|---|
-| Intel Arc / Intel iGPU (Windows or Linux) | `pip install torch torchvision --index-url https://download.pytorch.org/whl/xpu` |
-| NVIDIA | `pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124` |
-| CPU only | `pip install torch torchvision` |
+| script | what it does | time |
+|---|---|---|
+| `1_setup_mvtec.py` | extracts and checks the dataset | 2 min |
+| `2_make_splits_and_synthetic.py` | picks the 5 training photos per type, makes cut-paste synthetics | 2 min |
+| `3_refine_with_diffusion.py --limit 10` | touch-up on 10 images so you can eyeball `results/diffusion_comparison/` first | 1 min |
+| `3_refine_with_diffusion.py` | touch-up on all of them | ~10 min on GPU |
+| `4_anomaly_stage.py` | trains and evaluates stage 1 | 5 min |
+| `5_train_classifier.py --regime all --input crop` | trains stage 2 (zoomed). Also try `--input full` and `--input oracle` | 2 min |
+| `6_evaluate.py --input crop` | writes `results/REPORT_crop.md` and the figures | seconds |
+| `7_export_onnx.py --input crop` | exports the stage-2 classifier as one ONNX file | 1 min |
 
-Then `pip install -r requirements.txt`.
-
-Check the GPU is seen (Intel):
-
-```
-python -c "import torch; print(torch.__version__); print('xpu:', torch.xpu.is_available())"
-```
-
-`config.yaml` has `device: "auto"` everywhere, which resolves to `xpu` → `cuda` → `cpu`. Nothing else needs changing.
-
-**MVTec AD.** Free but requires registration: https://www.mvtec.com/company/research/datasets/mvtec-ad. Download `mvtec_ad.tar.xz` to `data/mvtec_ad/` and run script 1 to extract and verify.
-
----
-
-## Run
-
-```
-python scripts/1_setup_mvtec.py
-python scripts/2_make_splits_and_synthetic.py
-python scripts/3_refine_with_diffusion.py --limit 10      # tune first, see below
-python scripts/3_refine_with_diffusion.py
-python scripts/4_anomaly_stage.py
-python scripts/5_train_classifier.py --regime all
-python scripts/6_evaluate.py
-python scripts/7_export_onnx.py
-```
-
-### Then: let stage 1 tell stage 2 where to look
-
-Small defects nearly vanish when a 1024 px photo is resized to 224 px and pooled to one vector. Stage 1
-already computes a distance per patch, so its most anomalous patch says *where* the defect is. With
-`--input crop`, stage 2 classifies a square crop around that location instead of the whole image.
-Training crops are centred on the known masks; test crops use only stage 1's output, so the result is
-what the deployed system would get. `--input oracle` centres test crops on the ground truth instead and
-gives the ceiling if localisation were perfect.
-
-```powershell
-python scripts/4_anomaly_stage.py                          # once; also saves models/stage1_bank.npz
-python scripts/5_train_classifier.py --regime all --input crop
-python scripts/5_train_classifier.py --regime all --input oracle
-python scripts/6_evaluate.py --input crop                  # report includes a full-vs-crop-vs-oracle table
-```
-
-The report also prints how often stage 1 put the true defect centre inside the crop.
-
-### Then run more seeds (do this before quoting any stage-2 number)
-
-The seed decides *which* k real images per class are used for training, and with k = 5 that choice
-moves accuracy by several points. Scripts 2, 3 and 5 accept `--seed N`; each seed gets its own split,
-its own synthetic folders (`data/synthetic/<category>_sN/`) and its own result files
-(`results/stage2_<regime>_sN.json`). Script 6 averages whatever seeds it finds and reports mean ± sd.
+Then repeat with other random draws of the 5 training photos, so the numbers aren't a fluke:
 
 ```powershell
 .\run_seed.ps1 1
 .\run_seed.ps1 2
 ```
 
-`run_seed.ps1` trains all three input modes (full, crop, oracle) for that seed. Each seed costs one diffusion pass (~10 min on a decent GPU) plus a couple of minutes. Three seeds is
-the minimum for a claim; five is comfortable.
-
-Rough timings on an Intel Arc iGPU: script 2 a couple of minutes; script 3 about 10–20 s per image (200 images at default `per_class: 40` × 5 classes ≈ 40–60 min; the first run also downloads ~4 GB of weights and compiles kernels); scripts 4–7 a few minutes each. Feature vectors are cached in `data/feature_cache/`, so re-running 5 and 6 is fast.
-
-### Tune the diffusion step before running it in full
-
-`--limit 10` refines two images per class and writes before/after pairs to `results/diffusion_comparison/`. Look at them. You want the defect still clearly present, the paste edge gone, the part otherwise unchanged.
-
-- defect being erased or blurred → lower `diffusion.strength` (try 0.25)
-- nothing visibly changed → raise it (try 0.40)
-- the part changes shape or extra objects appear → lower `guidance_scale`, or tighten `negative_prompt`
-
-Then run without `--limit`. Already-refined files are skipped, so you can stop and resume.
+Script 6 averages over every seed it finds. `config.yaml` has every knob, with comments.
 
 ---
 
-## What you get
+## Things to know before quoting these numbers
 
-`results/REPORT.md` is the write-up; it is generated from the numbers, so it never claims more than they show. Figures:
-
-- `stage1_roc.png` — stage 1 good-vs-defective ROC and the operating point chosen for 95 % defect recall
-- `fig1_regime_comparison.png` — accuracy and macro-F1 per regime
-- `fig2_per_class_recall.png` — which defect types benefit from synthetic / refined data
-- `fig3_confusion_matrices.png` — one per regime
-- `stage2_<best>.onnx` + model card — single graph, image in → class probabilities out, validated against the sklearn model on real images
-
-### What to expect, honestly
-
-Stage 1 follows the PatchCore recipe (wide_resnet50_2, greedy coreset, 320 px) and lands around 0.97–0.98 AUROC
-on `screw`. For reference, the same code with a random 10 % patch subsample at 224 px got 0.82: the coreset and
-resolution matter.
-
-Stage 2 at k = 5 will be noisy. Any of these outcomes is a legitimate result if you report it as such:
-
-- synthetics help and refinement helps more — the clean story
-- synthetics help, refinement is neutral — cut-paste artefacts were not the bottleneck
-- synthetics hurt — the paste edge became a shortcut feature; refinement should then recover some of the loss, and that recovery is itself the finding
-
-Run 3+ seeds (`run_seed.ps1`) before quoting a number; the report prints the refined-minus-raw
-difference per seed and says whether its sign is consistent. On `screw`, expect `scratch_head` vs `scratch_neck` to be confused more than the rest: they differ mainly by location, and global pooled features discard location. If you want a category where defect types differ by appearance instead, set `dataset.name` to `hazelnut` or `metal_nut`; the tarball already contains every category.
+- One dataset category, 94 test images per run: the margin of error on any accuracy is about ±5 points. That's why everything is run three times.
+- Stage 1 picks the single most suspicious patch to crop around. Smoothing that decision, or checking a couple of candidate spots, would likely help the two weak defect types. Not done here.
+- MVTec AD is licensed for non-commercial use. The code is reusable anywhere; models and synthetic images built from MVTec are not for commercial use.
+- The ONNX export covers stage 2 only. Stage 1 still runs in PyTorch.
 
 ---
 
-## What is deliberately simplified
+## Under the hood 
 
-- Stage 1 uses a random 200k-patch pre-filter before the greedy coreset when the pool is larger than that
-- Frozen backbone + linear head in stage 2 (k = 5 per class is too few to fine-tune without overfitting)
-- Cut-paste keeps the defect near its source location with ±8 % jitter; MVTec parts are roughly centred so this is usually plausible
-- No pixel-level localisation metrics; the deployment question is image-level type
-
----
-
-## Talking about it
-
-The one-line version: *built a two-stage defect triage system where stage 1 flags bad parts from good images only, and stage 2 identifies the defect type from five real examples per class; tested whether mask-guided cut-paste synthetics and Stable Diffusion refinement close the few-shot gap, evaluated on held-out real defects, exported as one validated ONNX graph.*
-
-What to be ready to explain: why stage 1 needs no defect data and stage 2 does; why every regime gets the same real images and augmentation; how the scaler and classifier fold into one linear layer for export; what the per-class recall plot says about which defect types the synthetic data actually helped.
+- **Stage 1** follows the PatchCore recipe: wide_resnet50_2 features from layers 2 and 3 at 320 px, a memory bank of 20,000 patches chosen by greedy k-center coreset from all good training images, image score = largest distance from any patch to its nearest bank patch. The crop centre is the patch with that largest distance.
+- **Stage 2** uses frozen ImageNet ResNet50 features (2048-d, global pooled, 224 px input) with a StandardScaler and multinomial logistic regression. Every training image gets 8 flip/rotate variants. The three regimes differ only in what synthetic images are added.
+- **Cut-paste** finds each screw's position and orientation (Otsu mask, principal axis, head end = wider end) and maps the defect from the source screw's frame to the target screw's frame, with small jitter. Pastes that don't land on the screw are rejected.
+- **Diffusion touch-up** is Stable Diffusion 1.5 img2img at strength 0.3; the output is used only in a ring around the paste, and the defect pixels themselves are kept ("seam" mode). This was a deliberate choice after observing that letting the model repaint the defect tended to erase it.
+- **ONNX export** folds the scaler and classifier into one linear layer and attaches it to the ResNet50 backbone; verified against the sklearn model to 4e-6.
