@@ -1,0 +1,81 @@
+{
+  "real_only": {
+    "accuracy": 0.4716312056737588,
+    "accuracy_std": 0.024568096561260674,
+    "macro_f1": 0.47039832503371365,
+    "macro_f1_std": 0.025885402111483994,
+    "n_seeds": 3,
+    "seeds": [
+      1,
+      2,
+      42
+    ],
+    "per_class_recall": {
+      "manipulated_front": 0.631578947368421,
+      "scratch_head": 0.40350877192982454,
+      "scratch_neck": 0.5833333333333334,
+      "thread_side": 0.25925925925925924,
+      "thread_top": 0.46296296296296297
+    },
+    "composition": {
+      "real (with aug)": 200
+    }
+  },
+  "real_plus_synthetic": {
+    "accuracy": 0.5744680851063829,
+    "accuracy_std": 0.03835692846238289,
+    "macro_f1": 0.5612108554669529,
+    "macro_f1_std": 0.03569852804889863,
+    "n_seeds": 3,
+    "seeds": [
+      1,
+      2,
+      42
+    ],
+    "per_class_recall": {
+      "manipulated_front": 0.7017543859649122,
+      "scratch_head": 0.5789473684210527,
+      "scratch_neck": 0.7999999999999999,
+      "thread_side": 0.25925925925925924,
+      "thread_top": 0.5
+    },
+    "composition": {
+      "real (with aug)": 200,
+      "cut-paste synthetic": 200
+    }
+  },
+  "real_plus_refined": {
+    "accuracy": 0.5957446808510639,
+    "accuracy_std": 0.028146290543240346,
+    "macro_f1": 0.5845016071695673,
+    "macro_f1_std": 0.026190493537745843,
+    "n_seeds": 3,
+    "seeds": [
+      1,
+      2,
+      42
+    ],
+    "per_class_recall": {
+      "manipulated_front": 0.7543859649122807,
+      "scratch_head": 0.5438596491228069,
+      "scratch_neck": 0.7999999999999999,
+      "thread_side": 0.2777777777777778,
+      "thread_top": 0.5740740740740741
+    },
+    "composition": {
+      "real (with aug)": 200,
+      "diffusion-refined synthetic": 200
+    }
+  },
+  "stage1": {
+    "auroc": 0.9750908147379346,
+    "threshold": 1.7019083499908447,
+    "target_tpr": 0.95,
+    "defect_recall": 0.9680851063829787,
+    "good_fpr": 0.12195121951219512,
+    "n_test_good": 41,
+    "n_test_defect": 94,
+    "bank_patches": 20000,
+    "bank_dims": 1536
+  }
+}

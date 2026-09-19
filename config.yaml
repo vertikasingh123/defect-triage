@@ -1,0 +1,63 @@
+# Two-stage defect triage: (1) is it defective? (2) what kind of defect?
+# Stage 2 is few-shot; synthetic + diffusion-refined data is the augmentation under test.
+
+dataset:
+  name: "screw"          # MVTec AD category. Alternatives with texture-distinct defect types: hazelnut, metal_nut, pill
+  k_shot: 5              # real defect images per class used for training; the rest are held out for test
+  seed: 42
+
+synthetic:
+  per_class: 40          # synthetic images to generate per defect class (cut-paste from the k real ones)
+  output_size: 512       # save size (matches Stable Diffusion's native resolution)
+  paste_jitter: 0.25     # max shift of the pasted defect, as a fraction of the PART's width (not the image)
+  scale_range: [0.9, 1.1]
+  rotate_deg: 8          # jitter rotation, applied about the defect itself
+  feather_px: 7          # max mask edge blur (scaled down automatically for small defects)
+  min_on_part: 0.9       # reject a paste unless this fraction of it lands on the part
+
+diffusion:
+  model_id: "runwayml/stable-diffusion-v1-5"
+  prompt: "close-up product photograph of a metal {category} on a plain light background, small real surface defect, sharp focus, even studio lighting"
+  negative_prompt: "blurry, painting, cartoon, rendered, watermark, text, extra objects"
+  strength: 0.30         # img2img: 0.25-0.40 keeps the defect, harmonizes the paste boundary
+  guidance_scale: 6.0
+  num_inference_steps: 25
+  seed: 42
+  device: "auto"         # auto = xpu (Intel Arc) > cuda > cpu
+  restrict_to_paste: true   # composite diffusion output only around the paste (recommended)
+  refine_mode: "seam"       # seam = keep raw defect pixels, repaint only the boundary ring (cannot heal the defect)
+                            # patch = repaint the whole region incl. the defect (better texture, may heal it; use strength <= 0.25)
+  mask_grow_px: 24          # ring width beyond the paste that the model may repaint (at 512 px)
+  mask_feather_px: 15       # soft outer edge of that ring
+  core_shrink_px: 3         # seam mode: how much of the defect edge the model is allowed to blend
+  core_feather_px: 5
+
+features:
+  backbone: "resnet50"   # torchvision resnet50, ImageNet weights
+  input_size: 224
+  device: "auto"
+
+anomaly_stage:           # stage 1, PatchCore-style kNN on mid-level patch features (good images only)
+  backbone: "wide_resnet50_2"   # as in the PatchCore paper (stage 2 keeps resnet50)
+  input_size: 320               # higher than stage 2: screw defects are a few px wide on a 1024 px photo
+  layers: ["layer2", "layer3"]
+  coreset: "greedy"             # greedy = k-center coreset (paper); random = fast fallback
+  bank_fraction: 0.05           # fraction of good-image patches kept in the memory bank
+  max_bank_patches: 20000
+  max_pool_patches: 200000      # random pre-filter before coreset if the patch pool is larger than this
+  target_tpr: 0.95              # threshold chosen so 95% of held-out real defects are flagged
+
+classifier:
+  C: 1.0                 # LogisticRegression inverse regularization
+  dihedral_aug: true     # 8 flip/rotate variants of each real training image (applied to ALL regimes)
+  input: "full"          # full = whole image; crop = zoom on the defect located by stage 1; oracle = zoom via GT (upper bound)
+  crop_frac: 0.35        # crop side as a fraction of the image (0.35 of 1024 px = 358 px, resized to 224)
+
+paths:
+  mvtec_dir: "data/mvtec_ad/"
+  synthetic_dir: "data/synthetic/"
+  synthetic_refined_dir: "data/synthetic_refined/"
+  splits_dir: "data/splits/"
+  cache_dir: "data/feature_cache/"
+  models_dir: "models/"
+  results_dir: "results/"
