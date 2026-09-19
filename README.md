@@ -244,7 +244,6 @@ These results highlight the difficulty of detecting and classifying small, visua
 ├── config.yaml
 ├── requirements.txt
 ├── run_seed.ps1
-├── LICENSE
 └── README.md
 
 Generated locally when you run the pipeline (not in the repository):
@@ -457,7 +456,7 @@ Potential improvements include:
 
 ---
 
-## 📄 License and Dataset Usage
+## 📄 Dataset Usage
 
 The MVTec AD dataset is subject to its own license and usage restrictions. The dataset is intended for non-commercial research use, and models or synthetic images derived from it may be subject to applicable dataset terms.
 
