@@ -1,118 +1,474 @@
-# Defect triage for factory parts: find it, then name it
+# 🔩 Defect Triage for Industrial Screws
 
-**In one sentence:** a system that looks at a photo of a screw, decides whether it's defective, and if so, says *what kind* of defect it is, using only a handful of example photos per defect type.
+### Few-Shot Defect Classification with Patch-Based Anomaly Detection and Synthetic Data Augmentation
 
----
+An industrial visual inspection pipeline that first detects whether a screw is defective and then identifies the **type of defect** using only five real training images per defect category.
 
-## Why this is a real problem
-
-On a production line, cameras photograph every part. You want two answers for each photo:
-
-1. **Is this part bad?**
-2. **If yes, what's wrong with it?** A scratch on the head and a damaged thread come from different machines, so knowing the type tells you where to look for the cause.
-
-Question 1 is easy to get data for: a good factory produces thousands of good parts, so you have plenty of photos of "normal." Question 2 is hard: defects are rare, so you might have five photos of each defect type. Five is not enough to train a normal image classifier.
-
-This project shows how to answer both questions anyway.
+The project combines **PatchCore-based anomaly detection, defect localization, few-shot classification, cut-paste augmentation, and diffusion-based image refinement** to address the challenges of detecting and classifying rare manufacturing defects.
 
 ---
 
-## How it works
+## 📌 Overview
 
-Two stages, one after the other.
+Automated visual inspection systems need to answer two critical questions:
 
-**Stage 1: "Is it bad?"** Trained only on photos of good screws. It learns what normal looks like, patch by patch, and flags anything that doesn't match. It never sees a defect during training. As a bonus, because it checks each small patch of the image, it also knows *where* the odd part is.
+1. **Is the part defective?** — Detect anomalies without requiring defective samples during training.
+2. **What is the defect?** — Classify the detected defect into a specific category, even when only a handful of labeled examples are available.
 
-**Stage 2: "What's wrong?"** A classifier that names the defect type (five types for screws). It is trained on just 5 real photos per type. To make those 5 go further, we tested adding artificial examples:
+While normal production images are abundant, collecting labeled examples of every possible defect is expensive and impractical. This project addresses this challenge through a two-stage inspection pipeline.
 
-- **Cut-paste:** take the real defect out of one of the 5 photos (using its outline) and paste it onto a photo of a good screw, in the matching spot. Now you have 40 fake-but-realistic examples per type instead of 5.
-- **Cut-paste + diffusion touch-up:** same, but run Stable Diffusion over the pasted edge so it blends in. We wanted to know if this helps.
+### Key Highlights
 
-And one more trick that turned out to matter most: instead of showing stage 2 the whole screw, **show it only the small area stage 1 flagged**. Small defects are a few pixels on a big photo; zooming in on them helps a lot.
+* 🔍 Unsupervised anomaly detection trained exclusively on defect-free screws.
+* 🎯 Patch-level anomaly localization to identify suspicious regions.
+* 🧠 Few-shot defect classification using frozen ResNet-50 features.
+* 🧩 Cut-paste synthetic defect generation from only five real examples per class.
+* 🎨 Stable Diffusion-based refinement of synthetic defect boundaries.
+* 📊 Evaluation across three random few-shot training splits.
+* ⚡ ONNX export for the defect classification model.
 
+---
+
+## 🏗️ System Architecture
+
+The pipeline consists of two sequential stages.
+
+```text
+                         INPUT IMAGE
+                              │
+                              ▼
+               ┌──────────────────────────┐
+               │      STAGE 1             │
+               │   PatchCore Anomaly      │
+               │       Detection          │
+               │                          │
+               │ Trained on good screws   │
+               └────────────┬─────────────┘
+                            │
+                    Defect detected?
+                       ┌────┴────┐
+                       │         │
+                      No        Yes
+                       │         │
+                       ▼         ▼
+                  GOOD PART   ANOMALY MAP
+                                  │
+                                  ▼
+                         Suspicious Patch
+                                  │
+                                  ▼
+                         Localized Crop
+                                  │
+                                  ▼
+               ┌──────────────────────────┐
+               │      STAGE 2             │
+               │ Few-Shot Defect          │
+               │ Classification          │
+               │                          │
+               │ Frozen ResNet-50        │
+               │ + Logistic Regression   │
+               └────────────┬─────────────┘
+                            │
+                            ▼
+                      DEFECT TYPE
 ```
-photo ──► Stage 1: bad or good?  ──► if bad: where? ──► crop there ──► Stage 2: which defect type?
-          (trained on good only)      (free from stage 1)             (5 real examples + synthetics)
+
+### Stage 1 — Anomaly Detection and Localization
+
+Stage 1 follows the **PatchCore** approach to identify defective screws without seeing any defective images during training.
+
+* Extracts intermediate features from a pretrained `wide_resnet50_2` backbone.
+* Uses features from layers 2 and 3 at a resolution of 320 pixels.
+* Builds a memory bank containing representative normal image patches.
+* Selects 20,000 memory-bank features using greedy k-center coreset subsampling.
+* Computes the anomaly score using the largest nearest-neighbor distance between a test patch and the memory bank.
+* Uses the most anomalous patch to estimate the defect location.
+
+The result is both:
+
+* An image-level anomaly score indicating whether a screw is defective.
+* A suspicious patch location used to create the input crop for Stage 2.
+
+> **Important:** Stage 1 is trained exclusively on defect-free training images and does not require defect labels.
+
+### Stage 2 — Few-Shot Defect Classification
+
+Stage 2 identifies the specific defect category using a small number of labeled examples.
+
+The classifier uses:
+
+* A pretrained ImageNet **ResNet-50** backbone with frozen weights.
+* Global average-pooled 2048-dimensional feature vectors.
+* StandardScaler for feature normalization.
+* Multinomial logistic regression for five-class defect classification.
+* Eight flip/rotation-based augmentation variants per real training image (synthetic images are added as generated).
+
+Three training regimes were evaluated:
+
+| Regime               | Training data                                     |
+| -------------------- | ------------------------------------------------- |
+| Real only            | Five real images per defect type                  |
+| Cut-paste            | Real images + synthetic cut-paste samples         |
+| Diffusion refinement | Real images + diffusion-refined synthetic samples |
+
+The classifier was evaluated using three different inputs:
+
+* **Full image:** The entire screw image.
+* **Anomaly crop:** The region localized by Stage 1.
+* **Oracle crop:** The ground-truth defect region, used only as a reference upper-bound experiment.
+
+---
+
+## 🧪 Synthetic Data Generation
+
+To overcome the scarcity of labeled defect images, the project explores two synthetic data augmentation strategies.
+
+### 1. Cut-Paste Augmentation
+
+Defect regions are extracted from real defective screws and transferred onto defect-free screws.
+
+The process includes:
+
+1. Detecting the screw's position and orientation using an Otsu-based segmentation mask.
+2. Estimating the principal axis of the screw.
+3. Identifying the head end using the wider end of the screw.
+4. Transforming the defect from the source screw's coordinate system to the target screw's coordinate system.
+5. Applying small spatial perturbations to improve variation.
+6. Rejecting samples where the pasted defect falls outside the target screw.
+7. Saving the resulting synthetic defect image and its corresponding label.
+
+This process adds **40 synthetic examples per defect category** on top of the 5 real images per category.
+
+### 2. Diffusion-Based Refinement
+
+To investigate whether generative models can improve synthetic image realism, Stable Diffusion 1.5 is used to refine the boundaries of pasted defects.
+
+Configuration:
+
+| Parameter       | Value                     |
+| --------------- | ------------------------- |
+| Model           | Stable Diffusion 1.5      |
+| Task            | Image-to-image refinement |
+| Strength        | 0.3                       |
+| Refinement mode | Seam-only                 |
+| Defect pixels   | Preserved                 |
+
+The diffusion model is used only to refine a ring around the pasted region. The original defect pixels are retained to avoid accidentally removing or altering the defect.
+
+This experiment investigates whether improving the visual blending of synthetic defects improves downstream classification performance.
+
+---
+
+## 📊 Experimental Results
+
+Experiments were conducted on the **screw category of the MVTec AD dataset** using three independent random selections of five training images per defect category.
+
+### Stage 1 — Anomaly Detection Performance
+
+| Metric                                      |    Result |
+| ------------------------------------------- | --------: |
+| Image-level AUROC                           | **0.975** |
+| True-positive rate / defect recall          |       97% |
+| False-positive rate at that operating point |       12% |
+| Defect localization coverage                |       85% |
+
+The localization coverage measures how often the true defect falls within the crop generated from the most anomalous patch.
+
+### Stage 2 — Defect Classification Accuracy
+
+The task contains five defect categories, making random-guess accuracy 20%.
+
+| Classifier input         | Real only | + Cut-paste | + Diffusion refinement |
+| ------------------------ | --------: | ----------: | ---------------------: |
+| Full screw image         |       47% |         57% |                    60% |
+| **Stage 1 anomaly crop** |   **77%** |     **81%** |                **79%** |
+| Oracle defect crop       |       84% |         89% |                    87% |
+
+> Values are the mean over three random few-shot training splits (seeds 1, 2, 42); standard deviation across splits is 2–4 points. With 94 held-out test images per split, the sampling noise on any single accuracy is about ±5 points, which is why the experiments were repeated.
+
+### 🔎 Key Findings
+
+#### 1. Localization is critical for few-shot classification
+
+Using the Stage 1 anomaly crop increased accuracy from **47% to 77%** in the real-only setting.
+
+Small defects occupy only a few pixels in the full image. Cropping around the suspicious region provides the classifier with a more focused representation of the defect.
+
+#### 2. Cut-paste augmentation improves classification
+
+Cut-paste synthetic data improved accuracy across the evaluated input configurations.
+
+The improvement was particularly relevant to the more challenging defect categories, including the thread-related defects.
+
+#### 3. Diffusion refinement did not provide a consistent benefit
+
+Diffusion-based seam refinement did not outperform cut-paste augmentation consistently.
+
+The refinement modifies the paste boundary but leaves the actual defect unchanged. After localization and cropping, boundary realism may contribute less to classification than the underlying defect features.
+
+This experiment is therefore reported as a **negative or null result**, rather than as evidence that diffusion refinement is universally ineffective.
+
+#### 4. Localization is the next major bottleneck
+
+Using the exact ground-truth defect region increased accuracy further, reaching 89% with cut-paste augmentation.
+
+This suggests that improving Stage 1 localization could provide additional benefits, particularly for small thread-related defects.
+
+### Per-Class Performance
+
+With Stage 1 crops and cut-paste augmentation (per-class recall, i.e. the share of each type's test images labelled correctly):
+
+* Three of the five defect categories reached approximately **97–100% recall**.
+* The two thread-related categories reached **41% and 61% recall**.
+* The thread-related categories were also among those most affected by localization errors.
+
+These results highlight the difficulty of detecting and classifying small, visually similar defects.
+
+---
+
+## 📁 Project Structure
+
+```text
+.
+├── scripts/
+│   ├── common.py                        shared helpers (feature extraction, paths, image utilities)
+│   ├── 1_setup_mvtec.py
+│   ├── 2_make_splits_and_synthetic.py
+│   ├── 3_refine_with_diffusion.py
+│   ├── 4_anomaly_stage.py
+│   ├── 5_train_classifier.py
+│   ├── 6_evaluate.py
+│   ├── 7_export_onnx.py
+│   └── check_images.py                  removes truncated images left by interrupted runs
+├── figures/                             plots and reports copied from a completed run
+├── config.yaml
+├── requirements.txt
+├── run_seed.ps1
+├── LICENSE
+└── README.md
+
+Generated locally when you run the pipeline (not in the repository):
+├── data/                                dataset, splits, synthetic images, feature cache
+├── models/                              stage-1 memory bank, stage-2 classifiers
+└── results/                             reports, figures, ONNX export, diffusion before/after pairs
 ```
 
 ---
 
-## What we found
+## ⚙️ Installation
 
-Tested on the MVTec AD "screw" dataset, three runs with different random choices of the 5 training photos.
+### Requirements
 
-**Stage 1 works well.** It ranks defective vs good screws correctly 97.5% of the time (AUROC 0.975). Set to catch 97% of defects, it wrongly flags 12% of good parts. It puts the true defect inside its "look here" crop 85% of the time.
+* Python 3.10 or newer
+* GPU recommended for accelerated execution
 
-**Stage 2, accuracy at naming the defect type (5 types, so guessing = 20%):**
+  * Intel Arc
+  * NVIDIA CUDA-compatible GPU
+  * CPU-only execution is supported but slower
+* MVTec AD dataset
 
-| what the classifier sees | 5 real photos only | + cut-paste synthetics | + synthetics with diffusion touch-up |
-|---|---:|---:|---:|
-| the whole screw | 47% | 57% | 60% |
-| **the area stage 1 flagged** | **77%** | **81%** | 79% |
-| the exact defect area (cheating, for reference) | 84% | 89% | 87% |
+### 1. Clone the repository
 
-Four things this table says:
+```bash
+git clone <YOUR_REPOSITORY_URL>
+cd <YOUR_REPOSITORY_NAME>
+```
 
-1. **Zooming in on the area stage 1 flagged is the biggest win: +29 points**, from 47% to 77%, with no extra data. Small defects were simply too small to see in the full picture.
-2. **Cut-paste synthetics help every time.** In all three runs, both with and without zoom, adding them improved accuracy (by 2 to 16 points depending on the setup). The gains land on the two hardest defect types.
-3. **The diffusion touch-up didn't help.** Sometimes +2, sometimes −1, never outside the noise. We report this as a null result rather than hide it. The reason is fairly clear: the touch-up only smooths the edge of the paste and leaves the defect itself untouched, and once you zoom in, the edge barely matters.
-4. **The next bottleneck is stage 1's aim, not more data.** When the crop is placed perfectly (the "cheating" row), accuracy rises another 7–8 points, and the hardest type (thread_side) doubles. Improving where stage 1 points is the obvious follow-up.
-
-Per defect type, with zoom and cut-paste synthetics: three of the five types are at 97–100%. The two thread types are at 41% and 61%; those are the smallest defects and the ones stage 1 most often mislocates.
-
-Figures and the full auto-generated reports are in [`figures/`](figures/).
-
----
-
-## Running it yourself
-
-You need Python 3.10+, a GPU (Intel Arc, NVIDIA, or CPU-only if patient), and the MVTec AD dataset (free, needs registration: https://www.mvtec.com/company/research/datasets/mvtec-ad).
+### 2. Create a virtual environment
 
 ```powershell
 python -m venv venv
 venv\Scripts\activate
-pip install torch torchvision --index-url https://download.pytorch.org/whl/xpu   # Intel Arc
-# NVIDIA: --index-url https://download.pytorch.org/whl/cu124     CPU only: no --index-url
+```
+
+### 3. Install PyTorch
+
+**Intel Arc GPU:**
+
+```powershell
+pip install torch torchvision --index-url https://download.pytorch.org/whl/xpu
+```
+
+**NVIDIA GPU:**
+
+```powershell
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+```
+
+**CPU only:**
+
+```powershell
+pip install torch torchvision
+```
+
+### 4. Install project dependencies
+
+```powershell
 pip install -r requirements.txt
 ```
 
-Put `mvtec_ad.tar.xz` in `data/mvtec_ad/`, then run the scripts in order from the project root:
+---
 
-| script | what it does | time |
-|---|---|---|
-| `1_setup_mvtec.py` | extracts and checks the dataset | 2 min |
-| `2_make_splits_and_synthetic.py` | picks the 5 training photos per type, makes cut-paste synthetics | 2 min |
-| `3_refine_with_diffusion.py --limit 10` | touch-up on 10 images so you can eyeball `results/diffusion_comparison/` first | 1 min |
-| `3_refine_with_diffusion.py` | touch-up on all of them | ~10 min on GPU |
-| `4_anomaly_stage.py` | trains and evaluates stage 1 | 5 min |
-| `5_train_classifier.py --regime all --input crop` | trains stage 2 (zoomed). Also try `--input full` and `--input oracle` | 2 min |
-| `6_evaluate.py --input crop` | writes `results/REPORT_crop.md` and the figures | seconds |
-| `7_export_onnx.py --input crop` | exports the stage-2 classifier as one ONNX file | 1 min |
+## 📦 Dataset Setup
 
-Then repeat with other random draws of the 5 training photos, so the numbers aren't a fluke:
+This project uses the **screw category of the MVTec Anomaly Detection (MVTec AD) dataset**.
+
+Download the dataset from the official website:
+
+🔗 [MVTec AD Dataset](https://www.mvtec.com/company/research/datasets/mvtec-ad)
+
+The dataset requires registration and is licensed for non-commercial use.
+
+Place the downloaded archive at:
+
+```text
+data/mvtec_ad/mvtec_ad.tar.xz
+```
+
+Then run the setup script to extract and validate the dataset.
+
+---
+
+## ▶️ Running the Pipeline
+
+Run the scripts from the project root in the following order.
+
+| Step | Script                                                    | Description                                |   Approx. time |
+| ---: | --------------------------------------------------------- | ------------------------------------------ | -------------: |
+|    1 | `scripts/1_setup_mvtec.py`                                | Extracts and validates the dataset         |          2 min |
+|    2 | `scripts/2_make_splits_and_synthetic.py`                  | Creates few-shot splits and cut-paste data |          2 min |
+|    3 | `scripts/3_refine_with_diffusion.py --limit 10`           | Refines 10 samples for visual inspection   |          1 min |
+|    4 | `scripts/3_refine_with_diffusion.py`                      | Refines all synthetic samples              | ~10 min on GPU |
+|    5 | `scripts/4_anomaly_stage.py`                              | Trains and evaluates Stage 1               |          5 min |
+|    6 | `scripts/5_train_classifier.py --regime all --input crop` | Trains the Stage 2 classifier              |          2 min |
+|    7 | `scripts/6_evaluate.py --input crop`                      | Generates evaluation reports and figures   |        Seconds |
+|    8 | `scripts/7_export_onnx.py --input crop`                   | Exports the Stage 2 model to ONNX          |          1 min |
+
+Each is invoked as `python <script>`, for example `python scripts/1_setup_mvtec.py`.
+
+### Compare Different Classifier Inputs
+
+```powershell
+# Stage 2 using Stage 1 anomaly crops
+python scripts/5_train_classifier.py --regime all --input crop
+python scripts/6_evaluate.py --input crop
+
+# Stage 2 using full screw images
+python scripts/5_train_classifier.py --regime all --input full
+python scripts/6_evaluate.py --input full
+
+# Stage 2 using ground-truth defect crops
+python scripts/5_train_classifier.py --regime all --input oracle
+python scripts/6_evaluate.py --input oracle
+```
+
+### Evaluate Multiple Random Seeds
+
+To repeat the experiments with different selections of the five real training images:
 
 ```powershell
 .\run_seed.ps1 1
 .\run_seed.ps1 2
 ```
 
-Script 6 averages over every seed it finds. `config.yaml` has every knob, with comments.
+Evaluation scripts aggregate the results across available seeds.
+
+All major configuration parameters can be adjusted in `config.yaml`.
 
 ---
 
-## Things to know before quoting these numbers
+## 🧠 Technical Details
 
-- One dataset category, 94 test images per run: the margin of error on any accuracy is about ±5 points. That's why everything is run three times.
-- Stage 1 picks the single most suspicious patch to crop around. Smoothing that decision, or checking a couple of candidate spots, would likely help the two weak defect types. Not done here.
-- MVTec AD is licensed for non-commercial use. The code is reusable anywhere; models and synthetic images built from MVTec are not for commercial use.
-- The ONNX export covers stage 2 only. Stage 1 still runs in PyTorch.
+### PatchCore Configuration
+
+| Parameter         | Value                                 |
+| ----------------- | ------------------------------------- |
+| Backbone          | `wide_resnet50_2`                     |
+| Feature layers    | Layers 2 and 3                        |
+| Input resolution  | 320 × 320                             |
+| Training data     | Defect-free screws only               |
+| Memory bank size  | 20,000 patches                        |
+| Sampling          | Greedy k-center coreset               |
+| Image-level score | Maximum patch-to-memory-bank distance |
+| Localization      | Patch with the maximum anomaly score  |
+
+### Stage 2 Configuration
+
+| Parameter                   | Value                                            |
+| --------------------------- | ------------------------------------------------ |
+| Backbone                    | ImageNet-pretrained ResNet-50                    |
+| Backbone weights            | Frozen                                           |
+| Feature representation      | 2048-dimensional global pooled features          |
+| Feature normalization       | StandardScaler                                   |
+| Classifier                  | Multinomial logistic regression                  |
+| Number of defect categories | 5                                                |
+| Real images per category    | 5                                                |
+| Augmentation                | 8 flip/rotation variants per real training image |
+
+### ONNX Export
+
+The Stage 2 classifier is exported as a single ONNX model.
+
+The export process:
+
+1. Extracts the ResNet-50 feature representation.
+2. Folds the StandardScaler transformation and logistic regression parameters into a linear classification layer.
+3. Attaches the classification layer to the ResNet-50 backbone.
+4. Exports the combined model to ONNX.
+5. Verifies the exported output against the original scikit-learn classifier.
+
+The reported maximum numerical difference between the exported classifier and the original scikit-learn model was **4 × 10⁻⁶**.
+
+> **Note:** The ONNX export covers Stage 2 only. Stage 1 continues to run in PyTorch.
 
 ---
 
-## Under the hood 
+## ⚠️ Limitations
 
-- **Stage 1** follows the PatchCore recipe: wide_resnet50_2 features from layers 2 and 3 at 320 px, a memory bank of 20,000 patches chosen by greedy k-center coreset from all good training images, image score = largest distance from any patch to its nearest bank patch. The crop centre is the patch with that largest distance.
-- **Stage 2** uses frozen ImageNet ResNet50 features (2048-d, global pooled, 224 px input) with a StandardScaler and multinomial logistic regression. Every training image gets 8 flip/rotate variants. The three regimes differ only in what synthetic images are added.
-- **Cut-paste** finds each screw's position and orientation (Otsu mask, principal axis, head end = wider end) and maps the defect from the source screw's frame to the target screw's frame, with small jitter. Pastes that don't land on the screw are rejected.
-- **Diffusion touch-up** is Stable Diffusion 1.5 img2img at strength 0.3; the output is used only in a ring around the paste, and the defect pixels themselves are kept ("seam" mode). This was a deliberate choice after observing that letting the model repaint the defect tended to erase it.
-- **ONNX export** folds the scaler and classifier into one linear layer and attaches it to the ResNet50 backbone; verified against the sklearn model to 4e-6.
+* **Limited evaluation scope:** Experiments were conducted on the MVTec AD screw category, with 94 test images per run.
+* **Few-shot variability:** Accuracy can vary depending on which five real training images are selected.
+* **Localization errors:** Stage 1 selects only the single most anomalous patch, which can miss or misplace small defects.
+* **Synthetic data limitations:** Cut-paste samples may not perfectly reproduce the physical appearance of real defects.
+* **Diffusion refinement:** The evaluated seam-refinement approach did not consistently improve classification results.
+* **Deployment scope:** Only the Stage 2 classifier is currently exported to ONNX.
+
+---
+
+## 🚀 Future Work
+
+Potential improvements include:
+
+* Using multiple candidate anomalous patches instead of only the top-scoring patch.
+* Improving localization for small thread-related defects.
+* Exploring multi-scale feature extraction.
+* Evaluating more robust few-shot classification methods.
+* Testing additional defect synthesis and augmentation techniques.
+* Investigating end-to-end inference pipelines for production deployment.
+* Extending ONNX export to the complete two-stage system.
+
+---
+
+## 📚 References
+
+1. **PatchCore:** Roth et al. *Towards Total Recall in Industrial Anomaly Detection.* CVPR, 2022.
+2. **MVTec AD:** Bergmann et al. *The MVTec Anomaly Detection Dataset: A Comprehensive Real-World Dataset for Unsupervised Anomaly Detection.* CVPR, 2019.
+3. **Stable Diffusion:** Rombach et al. *High-Resolution Image Synthesis with Latent Diffusion Models.* CVPR, 2022.
+4. **ResNet:** He et al. *Deep Residual Learning for Image Recognition.* CVPR, 2016.
+
+---
+
+## 📄 License and Dataset Usage
+
+The MVTec AD dataset is subject to its own license and usage restrictions. The dataset is intended for non-commercial research use, and models or synthetic images derived from it may be subject to applicable dataset terms.
+
+Refer to the official [MVTec AD website](https://www.mvtec.com/company/research/datasets/mvtec-ad) for the complete dataset licensing conditions.
+
+---
+
+## 👩‍💻 Project Summary
+
+This project demonstrates a practical approach to industrial defect triage under severe data scarcity.
+
+By combining **unsupervised anomaly localization with few-shot defect classification**, the system separates the tasks of finding a defect and identifying its type. The experiments show that directing the classifier toward the anomalous region can be more impactful than simply generating additional training images.
+
+The results also identify a clear direction for future improvement: **better defect localization, particularly for small thread-related defects.**
