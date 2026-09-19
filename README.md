@@ -269,8 +269,8 @@ Generated locally when you run the pipeline (not in the repository):
 ### 1. Clone the repository
 
 ```bash
-git clone <YOUR_REPOSITORY_URL>
-cd <YOUR_REPOSITORY_NAME>
+git clone https://github.com/vertikasingh123/defect-triage.git
+cd defect-triage
 ```
 
 ### 2. Create a virtual environment
