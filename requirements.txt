@@ -1,5 +1,3 @@
-# Install torch/torchvision FIRST from the index that matches your hardware (see README), then:
-#   pip install -r requirements.txt
 diffusers>=0.27
 transformers>=4.38
 accelerate>=0.27
