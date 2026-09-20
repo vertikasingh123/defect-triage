@@ -1,6 +1,3 @@
-# Two-stage defect triage: (1) is it defective? (2) what kind of defect?
-# Stage 2 is few-shot; synthetic + diffusion-refined data is the augmentation under test.
-
 dataset:
   name: "screw"          # MVTec AD category. Alternatives with texture-distinct defect types: hazelnut, metal_nut, pill
   k_shot: 5              # real defect images per class used for training; the rest are held out for test
