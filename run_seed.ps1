@@ -1,4 +1,3 @@
-# Run the full stage-2 experiment for one seed:  .\run_seed.ps1 1
 param([Parameter(Mandatory=$true)][int]$Seed)
 $ErrorActionPreference = "Stop"
 python scripts/2_make_splits_and_synthetic.py --seed $Seed
